@@ -13,11 +13,14 @@ import requests
 
 import numpy as np
 import pandas
+import matplotlib.pyplot as plt
+import seaborn as sns
 from pypfopt import EfficientFrontier
 
 
 memoize = lru_cache(None)
 
+# Set up definitions for all state markets
 df_state_info = pandas.DataFrame([
     ('California', 'CA', 6611),
     ('Arizona', 'AZ', 5596),
@@ -73,10 +76,12 @@ df_state_info = pandas.DataFrame([
 ],
     columns=['STATE', 'STATE_INIT', 'PREDICTIT_ID'])
 assert len(df_state_info) == 51, len(df_state_info)
-df_state_info = df_state_info.head(25)
 
 # Predictit charges 10% on profits
 PREDICTIT_PROFIT_COMMISSION = 0.1
+
+# Predictit charges 5% on withdrawal
+PREDICTIT_WITHDRAWAL_FEE = 0.05
 
 
 def _data_dir() -> str:
@@ -85,6 +90,7 @@ def _data_dir() -> str:
 
 @memoize
 def _load_df_probabilities_economist() -> pandas.DataFrame:
+    """Load the D/R win probabilities from the Economist model (not currently used)"""
     df = pandas.read_csv(
         'https://cdn.economistdatateam.com/us-2020-forecast/data/'
         'president/state_averages_and_predictions_topline.csv'
@@ -103,6 +109,7 @@ def _load_df_probabilities_economist() -> pandas.DataFrame:
 
 @memoize
 def _load_df_state_models_fivethirtyeight() -> pandas.DataFrame:
+    """Load the D/R win probabilities by state from 538"""
     df = pandas.read_csv(
         'https://projects.fivethirtyeight.com/2020-general-data/'
         'presidential_state_toplines_2020.csv'
@@ -115,6 +122,7 @@ def _load_df_state_models_fivethirtyeight() -> pandas.DataFrame:
 
 @memoize
 def _load_df_correlation_economist() -> pandas.DataFrame:
+    """Load the state correlation matrix from The Economist"""
     r = requests.get(
         'https://cdn.economistdatateam.com/us-2020-forecast/'
         'data/president/economist_model_output.zip'
@@ -135,6 +143,7 @@ def _load_df_correlation_economist() -> pandas.DataFrame:
 
 @memoize
 def _load_df_predictit_prices() -> pandas.DataFrame:
+    """Get state prices for R/D win from Predictit"""
     df_list = []
 
     for idx, row in df_state_info.sort_values('STATE_INIT').iterrows():
@@ -172,6 +181,7 @@ def _load_df_predictit_prices() -> pandas.DataFrame:
 
 
 def _compute_df_mu_sigma_return() -> pandas.DataFrame:
+    """Get the Mu / Sigma vectors """
     df_probs = _load_df_state_models_fivethirtyeight()
     df_probs['DATE'] = pandas.to_datetime(df_probs['modeldate'])
     df_probs = df_probs[df_probs['DATE'].eq(df_probs['DATE'].max())][[
@@ -187,8 +197,13 @@ def _compute_df_mu_sigma_return() -> pandas.DataFrame:
     df_prices = _load_df_predictit_prices()
     df = df_probs.merge(df_prices)
 
-    df['D_WIN_PAYOUT'] = (1 - df['D_YES']).mul(1 - PREDICTIT_PROFIT_COMMISSION)
-    df['R_WIN_PAYOUT'] = (1 - df['R_YES']).mul(1 - PREDICTIT_PROFIT_COMMISSION)
+    # We pay commission on profits, plus a further 5 cents on the withdrawal
+    df['D_WIN_PAYOUT'] = (1 - df['D_YES']) \
+        .mul(1 - PREDICTIT_PROFIT_COMMISSION) \
+        .sub(PREDICTIT_PROFIT_COMMISSION)
+    df['R_WIN_PAYOUT'] = (1 - df['R_YES']) \
+        .mul(1 - PREDICTIT_PROFIT_COMMISSION) \
+        .sub(PREDICTIT_PROFIT_COMMISSION)
 
     # Expected value of one share is
     # P(win) * (1 - Price) * (1 - Commission) - (1 - P(win)) * Price
@@ -211,13 +226,16 @@ def _compute_df_mu_sigma_return() -> pandas.DataFrame:
     return df
 
 
-if __name__ == '__main__':
+def run_portfolio_optimization() -> None:
     df_corr = _load_df_correlation_economist()
     df_corr = df_corr.set_index(df_corr['state'])
     df_mu_sigma = _compute_df_mu_sigma_return()
+    df_mu_sigma = df_mu_sigma.sort_values('STATE_INIT')
     df_corr = df_corr.loc[df_mu_sigma['STATE_INIT']][df_mu_sigma['STATE_INIT'].values]
 
     # Covariance = diag(S) * Corr * diag(S)
+    # Note: This isn't going to be exactly correct since the Economist correlations are not the
+    # market returns, but let's assume they're roughly equal
     df_cov = pandas.DataFrame(np.matmul(
         np.matmul(
             np.diag(df_mu_sigma['STD_D_YES'].values),
@@ -225,6 +243,9 @@ if __name__ == '__main__':
         ),
         np.diag(df_mu_sigma['STD_D_YES'].values)
     ), index=df_mu_sigma['STATE_INIT'].values, columns=df_mu_sigma['STATE_INIT'].values)
+    sns.heatmap(df_corr, fmt=',.1f')
+    plt.title('Correlation matrix of state performance')
+    plt.show()
     df_mu_sigma.to_csv(os.path.join(_data_dir(), 'mu_sigma.csv'))
     df_cov.to_csv(os.path.join(_data_dir(), 'vcov_matrix.csv'))
 
@@ -234,7 +255,15 @@ if __name__ == '__main__':
     raw_weights = ef.max_sharpe()
     df_weights = pandas.DataFrame(
         [(state, w) for state, w in ef.clean_weights().items()], columns=['STATE_INIT', 'WEIGHT'])
+
+    df_weights[df_weights['WEIGHT'].gt(0)].set_index('STATE_INIT')['WEIGHT'].plot.barh()
+    plt.title('Optimal portfolio weights (D win)')
+    plt.show()
     print(df_weights.sort_values('WEIGHT', ascending=False))
     ef.portfolio_performance(verbose=True)
 
     df_weights.to_csv('portfolio_weights.csv', index=False)
+
+
+if __name__ == '__main__':
+    run_portfolio_optimization()
