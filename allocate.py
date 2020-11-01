@@ -252,12 +252,15 @@ def run_portfolio_optimization() -> None:
     ef = EfficientFrontier(
         expected_returns=df_mu_sigma.set_index('STATE_INIT')['MU_D_YES'],
         cov_matrix=df_cov)
-    raw_weights = ef.max_sharpe()
+    raw_weights = ef.max_sharpe(risk_free_rate=0)
     df_weights = pandas.DataFrame(
         [(state, w) for state, w in ef.clean_weights().items()], columns=['STATE_INIT', 'WEIGHT'])
 
     df_weights[df_weights['WEIGHT'].gt(0)].set_index('STATE_INIT')['WEIGHT'].plot.barh()
     plt.title('Optimal portfolio weights (D win)')
+    plt.ylabel('State market')
+    plt.xlabel('Weight')
+    sns.despine()
     plt.show()
     print(df_weights.sort_values('WEIGHT', ascending=False))
     ef.portfolio_performance(verbose=True)
